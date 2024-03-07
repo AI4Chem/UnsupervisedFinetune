@@ -153,6 +153,7 @@ LLaMA-Factory/path_to_math_checkpoint
 LLaMA-Factory/path_to_sft_checkpoint
 LLaMA-Factory/path_to_dpo_checkpoint
 LLaMA-Factory/path_to_no_it_checkpoint
+LLaMA-Factory/wandb
 # Cython debug symbols
 cython_debug/
 

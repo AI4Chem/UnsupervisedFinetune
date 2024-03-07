@@ -71,7 +71,7 @@ def run_sft(
     )
     template = get_template_and_fix_tokenizer(tokenizer, data_args.template)
 
-    trainer.set_template(template,data_args,model,0.1,'kto_pair',0,ref_model,)
+    trainer.set_template(template,data_args,model,0.1,'kto_pair',0,ref_model,generation_config=generating_args)
 
     # Keyword arguments for `model.generate`
     gen_kwargs = generating_args.to_dict()

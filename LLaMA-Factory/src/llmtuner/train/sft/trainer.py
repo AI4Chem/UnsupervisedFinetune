@@ -52,6 +52,8 @@ if is_peft_available():
 
 logger = get_logger(__name__)
 
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
 
 
 
@@ -60,12 +62,12 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
     r"""
     Inherits PeftTrainer to compute generative metrics such as BLEU and ROUGE.
     """
-    def set_template(self,template,data_args,model,beta,loss_type,ftx_gamma,ref_model=None,):   
+    def set_template(self,template,data_args,model,beta,loss_type,ftx_gamma,ref_model=None,generation_config={}):   
         self.tokenizer.padding_side = 'left'
         self.template = template
         self.template_seperator_left = self.template.format_user.slots[0].split('{{content}}')[0]
         self.template_seperator_right = self.template.format_user.slots[0].split('{{content}}')[1]
-        self.teacherforce_rate = 0.15
+        self.teacherforce_rate = -1
         self.second_collator = DPODataCollatorWithPadding(
         tokenizer=self.tokenizer,
         pad_to_multiple_of=8,
@@ -97,6 +99,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         self.ftx_gamma = ftx_gamma
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
         self.is_peft_model = is_peft_available() and isinstance(model, PeftModel)
+
+        self.generation_config = generation_config
 
         # Trainer.__init__(self, model=model, **kwargs)
         if not hasattr(self, "accelerator"):
@@ -218,6 +222,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 res.append(json.dumps({"label": label, "predict": pred}, ensure_ascii=False))
             writer.write("\n".join(res))
 
+    @torch.no_grad()
     def extract_prompt(self,input_ids):
         inputs = self.tokenizer.batch_decode(input_ids,clean_up_tokenization_spaces=True,)
         prefixs = []
@@ -232,55 +237,85 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             orig_ans.append(ans)
         return prompts,prefixs,orig_ans
 
+    @torch.no_grad()
     def get_weak_answer(self,model,prefixs,prompts,max_new_tokens):
         input = [f"{prefix}<question>\n{prompt}\n<answer this question>{self.template_seperator_right}" for prefix,prompt in zip(prefixs,prompts)]
         inputs = self.tokenizer(input, add_special_tokens=True, return_tensors="pt",padding=True)
         inputs = self._prepare_inputs(inputs)
-        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,max_new_tokens=max_new_tokens))
+        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,num_return_sequences=1,max_new_tokens=max_new_tokens,do_sample=True,repetition_penalty=2.0,num_beams=2,low_memory=True,bos_token_id=self.tokenizer.bos_token_id,eos_token_id=self.tokenizer.eos_token_id,pad_token_id=self.tokenizer.pad_token_id))
         outputs = [output[len(i):].replace('<pad>','') for output,i in zip(outputs,input)]
         return outputs
 
+    @torch.no_grad()
     def get_weak_hint(self,model,prefixs,prompts,max_new_tokens,answers):
         input = [f"{prefix}<question>\n{prompt}\n<weak answer>\n{answer}\n<generate a hint to help answer this question better>{self.template_seperator_right}" for prefix,prompt,answer in zip(prefixs,prompts,answers)]
         inputs = self.tokenizer(input, add_special_tokens=True, return_tensors="pt",padding=True)
         inputs = self._prepare_inputs(inputs)
-        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,max_new_tokens=max_new_tokens))
+        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,num_return_sequences=1,max_new_tokens=max_new_tokens,do_sample=True,repetition_penalty=2.0,num_beams=2,low_memory=True,bos_token_id=self.tokenizer.bos_token_id,eos_token_id=self.tokenizer.eos_token_id,pad_token_id=self.tokenizer.pad_token_id))
         outputs = [output[len(i):].replace('<pad>','') for output,i in zip(outputs,input)]
         return outputs
 
+    @torch.no_grad()
     def get_better_answer_with_hint(self,model,prefixs,prompts,max_new_tokens,hints):
         input = [f"{prefix}<question>\n{prompt}\n<hint>\n{hint}\n<answer this question according to hints>{self.template_seperator_right}" for prefix,prompt,hint in zip(prefixs,prompts,hints)]
         inputs = self.tokenizer(input, add_special_tokens=True, return_tensors="pt",padding=True)
         inputs = self._prepare_inputs(inputs)
-        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,max_new_tokens=max_new_tokens))
+        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,num_return_sequences=1,max_new_tokens=max_new_tokens,do_sample=True,repetition_penalty=2.0,num_beams=2,low_memory=True,bos_token_id=self.tokenizer.bos_token_id,eos_token_id=self.tokenizer.eos_token_id,pad_token_id=self.tokenizer.pad_token_id))
         outputs = [output[len(i):].replace('<pad>','') for output,i in zip(outputs,input)]
         return outputs
 
-
+    @torch.no_grad()
     def get_better_hint_with_ansers(self,model,prefixs,prompts,max_new_tokens,answer1s,answer2s):
-        input = [f"{prefix}<question>\n{prompt}\n<weak answer>\n{answer1}\n<better answer>\n{answer2}\n<generate a hint help to answer this question better according to answers>{self.template_seperator_right}" for prefix,prompt,answer1,answer2 in zip(prefixs,prompts,answer1s,answer2s)]
+        input = [f"{prefix}<question>\n{prompt}\n<weak answer>\n{answer1}\n<better answer>\n{answer2}\n<generate a hint to help answer this question step-by-step better according to answers>{self.template_seperator_right}" for prefix,prompt,answer1,answer2 in zip(prefixs,prompts,answer1s,answer2s)]
         inputs = self.tokenizer(input, add_special_tokens=True, return_tensors="pt",padding=True)
         inputs = self._prepare_inputs(inputs)
-        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,max_new_tokens=max_new_tokens))
+        outputs = self.tokenizer.batch_decode(self.accelerator.unwrap_model(model).generate(**inputs,num_return_sequences=1,max_new_tokens=max_new_tokens,do_sample=True,repetition_penalty=2.0,num_beams=2,low_memory=True,bos_token_id=self.tokenizer.bos_token_id,eos_token_id=self.tokenizer.eos_token_id,pad_token_id=self.tokenizer.pad_token_id))
         outputs = [output[len(i):].replace('<pad>','') for output,i in zip(outputs,input)]
         return outputs
+
+    def safegate(self,strs):
+        count = 0
+        p = 11
+        for s in strs:
+            for i in range(p - 1):
+                a,b = random.choice(s[len(s)//p * i:len(s)//p * (i+1)]),random.choice(s[len(s)//p * (i+1):len(s)//p * (i+2)])
+                if a == b:
+                    count += 1
+        return count / (len(strs) * p)
 
     @torch.no_grad()
     def get_answers_and_hints(self,model,prefixs,prompts,max_new_tokens,orig_ans=None,teacherforce=True):
         weak_answers = self.get_weak_answer(model,prefixs,prompts,max_new_tokens)
         weak_hints = self.get_weak_hint(model,prefixs,prompts,max_new_tokens,weak_answers)
-        if teacherforce and orig_ans is not None:
+        repetition_flag = False#self.safegate(weak_answers) > 0.1 or self.safegate(weak_hints) > 0.1 or any(['<question>' in i or 'answer>' in i for i in weak_answers]) or any(['<question>' in i or '<question>' in i for i in weak_hints])
+        if (teacherforce or repetition_flag) and orig_ans is not None:
             better_answers = orig_ans
+            # better_hints = self.get_better_hint_with_ansers(model,prefixs,prompts,max_new_tokens,weak_answers,better_answers)
         else:
             better_answers = self.get_better_answer_with_hint(model,prefixs,prompts,max_new_tokens,weak_hints)
-        better_hints = self.get_better_hint_with_ansers(model,prefixs,prompts,max_new_tokens,weak_answers,better_answers)
+        if repetition_flag and orig_ans is not None:
+            better_hints = ['Sure,You can answer this question like ' + i for i in orig_ans]
+        else:
+            better_hints = self.get_better_hint_with_ansers(model,prefixs,prompts,max_new_tokens,weak_answers,better_answers)
         prompt_for_hints = [f"{prefix}<question>\n{prompt}\n<generate a hint to help answer this question>{self.tokenizer.eos_token}" for prefix,prompt in zip(prefixs,prompts)]
         prompts = prompts + prompt_for_hints
         rejected = weak_answers+weak_hints
         accepted = better_answers+better_hints
         if self.accelerator.is_main_process:
-            print(prompts[0],weak_answers[0],better_answers[0],weak_hints[0],better_hints[0])
+            print("\n#########\n".join((prompts[0],weak_answers[0],better_answers[0],weak_hints[0],better_hints[0])))
         return prompts,rejected,accepted
+
+    def _pad_labels(self, batch: torch.Tensor, positions: List[Tuple[int, int]]) -> torch.Tensor:
+        padded_labels = []
+        for feature, (prompt_len, answer_len) in zip(batch, positions):
+            if self.tokenizer.padding_side == "left":
+                start, end = feature.size(0) - answer_len, feature.size(0)
+            else:
+                start, end = prompt_len, prompt_len + answer_len
+            padded_tensor = self.label_pad_token_id * torch.ones_like(feature)
+            padded_tensor[start:end] = feature[start:end]
+            padded_labels.append(padded_tensor)
+        return torch.stack(padded_labels, dim=0).contiguous()  # in contiguous memory
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
         """
@@ -303,25 +338,40 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         model.eval()
         ######genrate self-improving from hints examples########
         input_ids = inputs.input_ids
-        labels = inputs.labels
+        # labels = inputs.labels
         # print(prompts,labels,)
         prompts,prefixs,orig_ans = self.extract_prompt(input_ids)
         # print(prompts,prefixs,orig_ans)
-        max_new_tokens = max([len(i) for i in orig_ans])+1
+        max_new_tokens = min(max([len(i) for i in orig_ans])+1,300)
         teacherforce = random.uniform(0,1) < self.teacherforce_rate
         prompts,rejected,accepted = self.get_answers_and_hints(model,prefixs,prompts,max_new_tokens,orig_ans,teacherforce)
-        prompt_ids,rejected_ids,chosen_ids = self.tokenizer(prompts, add_special_tokens=True, return_tensors="pt",padding=True),self.tokenizer(rejected, add_special_tokens=True, return_tensors="pt",padding=True),self.tokenizer(accepted, add_special_tokens=True, return_tensors="pt",padding=True)
-
+        promptandaccepted = [i+self.template_seperator_right+j for i,j in zip(prompts,accepted)]
+        promptandrejected = [i+self.template_seperator_right+j for i,j in zip(prompts,rejected)]
+        inputs = promptandaccepted + promptandrejected
+        acceptedlabels = [j for i,j in zip(prompts,accepted)]
+        rejectedlabels = [j for i,j in zip(prompts,rejected)]
+        labels = acceptedlabels + rejectedlabels
+        # prompt_ids = self.tokenizer(prompts, add_special_tokens=True, return_tensors="pt",padding=True)
+        input_encoded = self.tokenizer(inputs, add_special_tokens=True, return_tensors="pt",padding=True)
+        labels = self.tokenizer(labels, add_special_tokens=False, return_tensors="pt",padding=True).input_ids
+        labels_length = [sum(i != self.tokenizer.pad_token_id ) for i in labels]
+        labels = input_encoded.input_ids.detach().clone()
+        for i in range(len(labels)):
+            labels[i][:-labels_length[i]] = self.label_pad_token_id
         ########################################
         # inputs = [{'prompt_ids':prompt_id,'rejected_ids':rejected_id,'chosen_ids':chosen_id} for prompt_id,rejected_id,chosen_id in zip(prompt_ids,rejected_ids,chosen_ids)]
         # inputs = self.second_collator(inputs)
-        model.train()
-        inputs = {'prompt_input_ids':prompt_ids.input_ids,'prompt_labels':prompt_ids.input_ids,'prompt_attention_mask':prompt_ids.attention_mask,'rejected_input_ids':rejected_ids.input_ids,'rejected_labels':rejected_ids.input_ids,'rejected_attention_mask':rejected_ids.attention_mask,'chosen_input_ids':chosen_ids.input_ids,'chosen_labels':chosen_ids.input_ids,'chosen_attention_mask':chosen_ids.attention_mask}
-
+        length = len(input_encoded.input_ids)
+        
+        inputs = {'rejected_input_ids':input_encoded.input_ids[length//2:],'rejected_labels':labels[length//2:],
+                  'rejected_attention_mask':input_encoded.attention_mask[length//2:],'chosen_input_ids':input_encoded.input_ids[:length//2],
+                  'chosen_labels':labels[:length//2],'chosen_attention_mask':input_encoded.attention_mask[:length//2]}
+        
+        # print({k:v.shape for k,v in inputs.items()})
         inputs = self._prepare_inputs(inputs)
         # print(inputs)
 
-
+        model.train()
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
 
@@ -549,7 +599,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             return (per_token_logps * loss_mask).sum(-1)
 
     def concatenated_forward(
-        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
+        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]],loss=False
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
 
@@ -577,12 +627,33 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             if self.is_encoder_decoder
             else {}
         )
-        all_logits = model(
+
+
+        ret = model(
             concatenated_batch["concatenated_input_ids"],
             attention_mask=concatenated_batch["concatenated_attention_mask"],
             use_cache=False,
             **model_kwargs,
-        ).logits
+        )
+
+        all_logits = ret.logits
+        if loss:
+            all_loss = []
+            all_labels = concatenated_batch["concatenated_labels"]
+            # print(all_labels.shape,all_logits.shape,)
+            for logits,labels in zip([all_logits[:all_logits.size(0)//2],all_logits[all_logits.size(0)//2:]],[all_labels[:all_labels.size(0)//2],all_labels[all_labels.size(0)//2:]]):
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.accelerator.unwrap_model(model).config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+                all_loss.append(loss)
+        
 
         all_logps = self.get_batch_logps(
             all_logits,
@@ -598,7 +669,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         chosen_logits = all_logits[:len_chosen]
         rejected_logits = all_logits[len_chosen:]
 
-        return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
+        if loss:
+            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits,all_loss)
+        else: 
+            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
 
     def get_batch_loss_metrics(
         self,
@@ -614,7 +688,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             policy_rejected_logps,
             policy_chosen_logits,
             policy_rejected_logits,
-        ) = self.concatenated_forward(model, batch)
+            all_loss
+        ) = self.concatenated_forward(model, batch,loss=True)
 
         # if reference_chosen_logps and reference_rejected_logps in batch use them, otherwise use the reference model
         if "reference_chosen_logps" in batch and "reference_rejected_logps" in batch:
@@ -656,7 +731,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().mean().cpu()
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
 
-        return losses.mean(), metrics
+        return losses.mean()+all_loss[0]/all_loss[1], metrics
 
     def compute_loss(
         self,

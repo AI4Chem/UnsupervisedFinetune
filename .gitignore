@@ -109,6 +109,7 @@ ipython_config.py
 #   https://pdm.fming.dev/#use-with-ide
 .pdm.toml
 
+*_checkpoints
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
 
@@ -148,7 +149,10 @@ dmypy.json
 
 # pytype static type analyzer
 .pytype/
-
+LLaMA-Factory/path_to_math_checkpoint
+LLaMA-Factory/path_to_sft_checkpoint
+LLaMA-Factory/path_to_dpo_checkpoint
+LLaMA-Factory/path_to_no_it_checkpoint
 # Cython debug symbols
 cython_debug/
 

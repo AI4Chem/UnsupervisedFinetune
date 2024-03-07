@@ -12,3 +12,7 @@ configure Accelerate like `accelerate.yaml`
 cd LLaMa-Factory
 accelerate launch src/train_bash.py     --stage sft     --do_train     --model_name_or_path google/gemma-2b-it     --dataset mathinstruct    --template gemma     --finetuning_type lora --lora_target all     --output_dir path_to_math_checkpoint      --per_device_train_batch_size 1     --gradient_accumulation_steps 2     --lr_scheduler_type cosine     --logging_steps 1     --save_steps 50     --learning_rate 5e-5     --num_train_epochs 1     --plot_loss     --bf16  --upcast_layernorm=true --ddp_find_unused_parameters=false --flash_attn --neftune_noise_alpha 5 --preprocessing_num_workers 8 --overwrite_output_dir
 ```
+
+## Credit
+
+Zhang Di @ FDU

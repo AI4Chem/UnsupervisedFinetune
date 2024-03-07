@@ -15,4 +15,4 @@ accelerate launch src/train_bash.py     --stage sft     --do_train     --model_n
 
 ## Credit
 
-Zhang Di @ FDU
+Zhang Di @ FDU & ShanghaiAILab
